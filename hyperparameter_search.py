@@ -18,119 +18,54 @@ from optuna.pruners import MedianPruner
 from optuna.samplers import TPESampler
 from models.lstm_with_attention import BiLSTMAttention
 import pickle
+from data_loader import create_dataloaders
 
 def plot_top_configs(top_results):
-    """
-    Plot comparison of top hyperparameter configurations
+    """Plot comparative results of top hyperparameter configurations."""
+    if not top_results:
+        return
     
-    Args:
-        top_results: List of top configurations and their results
-    """
-    plt.figure(figsize=(12, 6))
+    plt.figure(figsize=(12, 8))
     
-    # Bar chart of mean validation accuracies
-    plt.subplot(1, 2, 1)
-    accuracies = [result['mean_val_acc'] for result in top_results]
-    errors = [result['std_val_acc'] for result in top_results]
-    config_labels = [f"Config {i+1}" for i in range(len(top_results))]
+    # Group by learning rate
+    lrs = []
+    val_accs = []
     
-    plt.bar(config_labels, accuracies, yerr=errors, capsize=10)
-    plt.ylim(max(0, min(accuracies) - 0.1), min(1.0, max(accuracies) + 0.1))
-    plt.title('Validation Accuracy by Configuration')
-    plt.ylabel('Mean Validation Accuracy')
-    plt.xlabel('Configuration')
+    for config, metrics in top_results:
+        lrs.append(config['learning_rate'])
+        val_accs.append(metrics['val_accuracy'])
     
-    # Add configuration details as text
-    plt.subplot(1, 2, 2)
-    plt.axis('off')
-    config_text = "Top Configurations:\n\n"
+    # Sort by learning rate
+    lr_acc_pairs = sorted(zip(lrs, val_accs))
+    lrs, val_accs = zip(*lr_acc_pairs)
     
-    for i, result in enumerate(top_results):
-        config_text += f"Config {i+1}:\n"
-        for key, value in result['config'].items():
-            if key != 'num_epochs':  # Skip epochs as it's fixed for hyperparameter search
-                config_text += f"  {key}: {value}\n"
-        config_text += f"  Accuracy: {result['mean_val_acc']:.4f} ± {result['std_val_acc']:.4f}\n\n"
+    # Plot learning rate vs validation accuracy
+    plt.plot(lrs, val_accs, 'o-', label='Validation Accuracy')
+    plt.xlabel('Learning Rate')
+    plt.ylabel('Validation Accuracy')
+    plt.xscale('log')
+    plt.title('Learning Rate vs Validation Accuracy')
+    plt.grid(True, alpha=0.3)
     
-    plt.text(0, 0.5, config_text, fontsize=9, verticalalignment='center')
+    # Mark best point
+    best_idx = val_accs.index(max(val_accs))
+    plt.scatter([lrs[best_idx]], [val_accs[best_idx]], c='red', s=100, label=f'Best LR: {lrs[best_idx]:.8f}')
     
+    plt.legend()
     plt.tight_layout()
-    os.makedirs('visualizations', exist_ok=True)
+    
+    # Save the plot
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    os.makedirs('visualizations', exist_ok=True)
     plt.savefig(f'visualizations/hyperparameter_comparison_{timestamp}.png')
+    plt.close()
     
-    # Log to MLflow if in active run
-    if mlflow.active_run():
+    # Log to MLflow if available
+    try:
         mlflow.log_artifact(f'visualizations/hyperparameter_comparison_{timestamp}.png')
+    except:
+        pass
 
-
-def get_optimal_lr(lr_finder):
-    """
-    Get the optimal learning rate from the lr_finder history.
-    This is a replacement for the non-existent suggestion() method.
-    
-    The approach finds the point with the steepest downward slope
-    in the loss vs. learning rate curve.
-    
-    Args:
-        lr_finder: The LRFinder object after running range_test
-        
-    Returns:
-        float: The suggested optimal learning rate
-    """
-    lrs = lr_finder.history["lr"]
-    losses = lr_finder.history["loss"]
-    
-    # Handle empty history
-    if not lrs or not losses:
-        print("Warning: Empty learning rate history. Using default learning rate.")
-        return 1e-4  # Changed from 1e-3 to 1e-4 for sentiment analysis
-    
-    # Skip the beginning and end of the curve for more stable results
-    skip_start = min(10, len(lrs) // 10)
-    skip_end = min(5, len(lrs) // 20)
-    
-    if skip_start >= len(lrs) or skip_end >= len(lrs) or skip_start + skip_end >= len(lrs):
-        # If not enough data points, use a simpler approach
-        if len(lrs) > 3:
-            min_loss_idx = losses.index(min(losses))
-            # Return the learning rate at minimum loss or slightly before
-            return lrs[max(0, min_loss_idx - 1)]
-        return lrs[0] if lrs else 1e-4  # Changed from 1e-3 to 1e-4 for sentiment analysis
-    
-    # Calculate gradients with safeguards for division by zero
-    gradients = []
-    for i in range(skip_start, len(lrs) - skip_end - 1):
-        lr_diff = lrs[i + 1] - lrs[i]
-        if abs(lr_diff) < 1e-10:  # Avoid division by near-zero
-            continue
-        gradients.append((losses[i + 1] - losses[i]) / lr_diff)
-    
-    # Check if we have valid gradients
-    if not gradients:
-        print("Warning: Could not calculate valid gradients. Using median learning rate.")
-        return lrs[len(lrs) // 2]
-    
-    # Find the point with the steepest negative gradient
-    # (use smoothed gradient to avoid noise)
-    smooth_window = min(5, len(gradients) // 5)
-    if smooth_window > 0 and len(gradients) > smooth_window:
-        smoothed_gradients = []
-        for i in range(len(gradients) - smooth_window + 1):
-            smoothed_gradients.append(sum(gradients[i:i+smooth_window]) / smooth_window)
-        
-        if not smoothed_gradients:
-            # If we somehow ended up with no smoothed gradients
-            steepest_idx = gradients.index(min(gradients))
-        else:
-            steepest_idx = smoothed_gradients.index(min(smoothed_gradients))
-    else:
-        steepest_idx = gradients.index(min(gradients))
-    
-    # Return the learning rate at the steepest point
-    suggested_lr = lrs[skip_start + steepest_idx]
-    
-    return suggested_lr
 
 def find_learning_rate(data_path, batch_size=32, min_lr=1e-7, max_lr=10, num_iter=100):
     """
@@ -165,56 +100,17 @@ def find_learning_rate(data_path, batch_size=32, min_lr=1e-7, max_lr=10, num_ite
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     
     # Load data and config
-    with open(os.path.join(data_path, 'train_data.pkl'), 'rb') as f:
-        train_data = pickle.load(f)
-    with open(os.path.join(data_path, 'val_data.pkl'), 'rb') as f:
-        val_data = pickle.load(f)
-    with open(os.path.join(data_path, 'config.pkl'), 'rb') as f:
-        config = pickle.load(f)
+    X_train = np.load(os.path.join(data_path, 'X_train.npy'))
+    X_val = np.load(os.path.join(data_path, 'X_val.npy'))
+    y_train = np.load(os.path.join(data_path, 'y_train.npy'))
+    y_val = np.load(os.path.join(data_path, 'y_val.npy'))
     
-    # Debug prints for raw data
-    print("Raw data shapes:")
-    print(f"Number of training sequences: {len(train_data['X'])}")
-    print(f"Number of validation sequences: {len(val_data['X'])}")
+    # Load config from JSON
+    config_path = os.path.join('configs', 'model_config.json')
+    with open(config_path, 'r') as f:
+        config = json.load(f)
     
-    # Debug y_train data
-    print("\nInspecting y_train data:")
-    print(f"Type of y_train: {type(train_data['y'])}")
-    print(f"First 5 y_train values: {train_data['y'][:5]}")
-    print(f"Shape of y_train if numpy: {train_data['y'].shape if hasattr(train_data['y'], 'shape') else 'not a numpy array'}")
-    
-    # Debug X_train data
-    print("\nInspecting X_train data:")
-    print(f"Type of X_train: {type(train_data['X'])}")
-    print(f"Length of X_train: {len(train_data['X'])}")
-    print(f"First sequence shape: {np.array(train_data['X'][0]).shape}")
-    print(f"First sequence: {train_data['X'][0]}")
-    
-    # Check if all X sequences have the same length
-    sequence_lengths = [len(seq) for seq in train_data['X']]
-    if len(set(sequence_lengths)) > 1:
-        print("\nWarning: Found varying sequence lengths:")
-        for length in sorted(set(sequence_lengths)):
-            count = sequence_lengths.count(length)
-            print(f"Length {length}: {count} sequences")
-    
-    # Detailed inspection of y_train values
-    print("\nChecking for problematic y_train values...")
-    for idx, val in enumerate(train_data['y']):
-        if not isinstance(val, (int, np.int32, np.int64)) or val not in [0, 1]:
-            print(f"Problematic value at index {idx}: {val} (type: {type(val)})")
-    
-    # Convert to numpy arrays
-    print("\nAttempting to convert to numpy arrays...")
-    X_train = np.array(train_data['X'])
-    X_val = np.array(val_data['X'])
-    y_train = np.array(train_data['y'])
-    y_val = np.array(val_data['y'])
-    
-    # Print tensor shapes
-    print("\nTensor shapes:")
-    print(f"X_train shape: {X_train.shape}")
-    print(f"y_train shape: {y_train.shape}")
+    # No need to convert to numpy arrays since data is already in NumPy format
     
     # Convert to PyTorch tensors
     X_train = torch.tensor(X_train, dtype=torch.long)
@@ -223,58 +119,107 @@ def find_learning_rate(data_path, batch_size=32, min_lr=1e-7, max_lr=10, num_ite
     y_val = torch.tensor(y_val, dtype=torch.float)
     
     # Create data loaders
-    train_loader = DataLoader(
-        TensorDataset(X_train, y_train),
-        batch_size=batch_size,
-        shuffle=True
-    )
-    
-    val_loader = DataLoader(
-        TensorDataset(X_val, y_val),
-        batch_size=batch_size,
-        shuffle=False
+    train_loader, val_loader, _ = create_dataloaders(
+        X_train.tolist(), X_val.tolist(), [],  # Empty test set since we don't need it
+        y_train.tolist(), y_val.tolist(), [],
+        batch_size=batch_size
     )
     
     # Initialize model
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # For learning rate finder, using CPU can be more stable
+    device = torch.device("cpu")
+    print(f"Using {device} for learning rate finder for better stability")
+    
     model = BiLSTMAttention(
-        vocab_size=config['vocab_size'],  # Get vocab size from config
-        embedding_dim=config['embedding_dim'],  # Get embedding dim from config
+        vocab_size=config['vocab_size'],
+        embedding_dim=config['embedding_dim'],
         hidden_dim=256,
         num_layers=2,
         dropout=0.5
     ).to(device)
     
     # Initialize optimizer and loss
-    criterion = nn.BCELoss()
+    criterion = nn.BCEWithLogitsLoss()  # Use BCEWithLogitsLoss instead of BCELoss
     optimizer = optim.Adam(model.parameters(), lr=1e-5, weight_decay=1e-5)
     
-    # Initialize LR Finder with custom forward function
-    def custom_forward(model, x, y):
-        # Ensure input is properly padded to max_seq_length
-        if x.size(1) > 26:
-            x = x[:, :26]
-        return model(x)
+    # Create a simple adapter for our model during LR finding
+    class ModelAdapter(nn.Module):
+        def __init__(self, model):
+            super().__init__()
+            self.model = model
+            
+        def forward(self, batch):
+            # Handle batch from DataLoader which is a tuple (text, lengths, labels)
+            text, lengths = batch[0], batch[1]
+            
+            # Debug zero lengths
+            zero_lengths = (lengths == 0).sum().item()
+            if zero_lengths > 0:
+                print(f"Warning: Found {zero_lengths} sequences with zero length")
+                print(f"First few lengths: {lengths[:10]}")
+                print(f"Full length tensor shape: {lengths.shape}")
+                # Ensure all lengths are at least 1 to avoid LSTM errors
+                lengths = torch.clamp(lengths, min=1)
+            
+            # Create mask
+            mask = (text != 0)
+            
+            # Get model prediction - our model returns (output, attention_weights) tuple
+            outputs, _ = self.model(text, lengths, mask)
+            
+            # Return just the first element (logits)
+            return outputs
     
-    lr_finder = LRFinder(model, optimizer, criterion, device=device)
-    lr_finder.forward = custom_forward
+    # Wrap our model in the adapter
+    model_adapter = ModelAdapter(model)
+    
+    # Use the standard LRFinder with our adapter
+    lr_finder = LRFinder(model_adapter, optimizer, criterion, device=device)
     
     # Run LR Finder
     print(f"Running LR Finder from {min_lr} to {max_lr} over {num_iter} iterations...")
-    lr_finder.range_test(train_loader, val_loader=val_loader, end_lr=max_lr, num_iter=num_iter, step_mode="exp")
     
-    # Get suggestion
-    suggested_lr = get_optimal_lr(lr_finder)
-    print(f"Suggested learning rate: {suggested_lr:.8f}")
+    try:
+        # Run LR finder
+        lr_finder.range_test(
+            train_loader, 
+            val_loader=val_loader, 
+            end_lr=min(0.1, max_lr),  # Use a more conservative upper bound (0.1)
+            num_iter=min(50, num_iter),  # Reduce number of iterations for stability
+            step_mode="exp",
+            diverge_th=5.0  # Increase divergence threshold to avoid early stopping
+        )
+        
+        # Get suggestion
+        if len(lr_finder.history['lr']) > 10:
+            # Find learning rate with steepest gradient
+            suggested_lr = lr_finder.steepest_gradient(skip_start=5, skip_end=5)
+            if suggested_lr is None:
+                # If steepest gradient fails, use minimum loss
+                suggested_lr = lr_finder.get_best_lr(skip_start=5, skip_end=5)
+            print(f"Suggested learning rate: {suggested_lr:.8f}")
+        else:
+            # If we don't have enough data points, use a reasonable default
+            suggested_lr = 1e-4
+            print(f"Not enough data points in LR finder history. Using default: {suggested_lr}")
+        
+    except Exception as e:
+        import traceback
+        print(f"Error running learning rate finder: {e}")
+        print("Full traceback:")
+        traceback.print_exc()
+        suggested_lr = 1e-4  # Return a reasonable default
+        print(f"Using default learning rate: {suggested_lr}")
     
     # Plot the results
     try:
         fig, ax = plt.subplots(figsize=(10, 6))
-        lr_finder.plot(ax=ax, skip_start=10, skip_end=5)
+        lr_finder.plot(ax=ax, skip_start=5, skip_end=5)
         ax.set_title('Learning Rate Finder')
         ax.set_xlabel('Learning Rate')
         ax.set_ylabel('Loss')
-        ax.axvline(x=suggested_lr, color='r', linestyle='--', alpha=0.7)
+        ax.axvline(x=suggested_lr, color='r', linestyle='--', alpha=0.7, label='steepest gradient')
+        plt.legend()
         
         # Save the plot
         os.makedirs('visualizations', exist_ok=True)
@@ -516,7 +461,36 @@ def main():
             print(f"Suggested learning rate: {suggested_lr:.8f}")
             print(f"Configuration saved to configs/lr_finder_config.json")
         except Exception as e:
+            import traceback
             print(f"Error running learning rate finder: {e}")
+            print("Full traceback:")
+            traceback.print_exc()
+            
+            # Create a default learning rate configuration even if finder fails
+            print("\nCreating default learning rate configuration...")
+            default_lr = 1e-4  # A reasonable default for sentiment analysis
+            
+            # Save the default learning rate to a config file
+            lr_config = {
+                'batch_size': args.batch_size,
+                'learning_rate': default_lr,
+                'weight_decay': 1e-5,
+                'use_lr_scheduler': True,
+                'num_epochs': 50
+            }
+            
+            os.makedirs('configs', exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            config_path = os.path.join('configs', f'lr_finder_config_{timestamp}.json')
+            with open(config_path, 'w') as f:
+                json.dump(lr_config, f, indent=2)
+            
+            # Also save to a standard name for easy reference
+            standard_config_path = os.path.join('configs', 'lr_finder_config.json')
+            with open(standard_config_path, 'w') as f:
+                json.dump(lr_config, f, indent=2)
+            
+            print(f"Default configuration with learning rate {default_lr} saved to {standard_config_path}")
         return
     
     # Use Bayesian optimization if requested

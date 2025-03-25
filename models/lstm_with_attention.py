@@ -14,6 +14,17 @@ class AttentionLayer(nn.Module):
         attention_weights = self.attention(lstm_output)  # (batch_size, seq_len, 1)
         
         if mask is not None:
+            # Ensure mask has the same sequence length as lstm_output
+            if mask.size(1) != lstm_output.size(1):
+                print(f"Resizing mask from {mask.size(1)} to {lstm_output.size(1)}")
+                if mask.size(1) > lstm_output.size(1):
+                    # Truncate mask to match lstm_output sequence length
+                    mask = mask[:, :lstm_output.size(1)]
+                else:
+                    # Pad mask to match lstm_output sequence length
+                    pad_size = lstm_output.size(1) - mask.size(1)
+                    mask = torch.nn.functional.pad(mask, (0, pad_size), value=0)
+            
             # Apply mask to attention weights
             attention_weights = attention_weights.masked_fill(mask.unsqueeze(-1) == 0, float('-inf'))
         
@@ -77,35 +88,84 @@ class BiLSTMAttention(nn.Module):
         nn.init.xavier_normal_(self.fc.weight)
         nn.init.constant_(self.fc.bias, 0)
     
-    def forward(self, text, text_lengths, mask=None):
-        # text shape: (batch_size, seq_len)
-        # text_lengths shape: (batch_size,)
-        # mask shape: (batch_size, seq_len)
+    def forward(self, text, text_lengths=None, mask=None):
+        """Forward pass of the model.
         
-        # Embedding
-        embedded = self.dropout(self.embedding(text))  # (batch_size, seq_len, embedding_dim)
+        Args:
+            text: Padded input sequences [batch_size, max_seq_length=26]
+            text_lengths: True sequence lengths before padding [batch_size]
+            mask: Attention mask (1 for real tokens, 0 for padding) [batch_size, max_seq_length]
+        """
+        # Handle case where we receive a batch directly from LRFinder
+        if isinstance(text, tuple) and len(text) >= 1:
+            print("Model received tuple input, extracting first element as text")
+            # This is likely from the DataLoader via LRFinder
+            batch = text
+            text = batch[0]
+            if len(batch) > 1:
+                text_lengths = batch[1]
         
-        # Pack padded sequence
-        packed_embedded = nn.utils.rnn.pack_padded_sequence(
-            embedded, text_lengths.cpu(), batch_first=True, enforce_sorted=False
-        )
+        # Handle the case where text might not be on the correct device
+        if not isinstance(text, torch.Tensor):
+            print(f"Warning: Text is not a tensor, but {type(text)}")
+            text = torch.tensor(text, device=self.fc.weight.device)
         
-        # LSTM
-        packed_output, (hidden, cell) = self.lstm(packed_embedded)
+        # Move tensor to the model's device if needed
+        if text.device != self.fc.weight.device:
+            text = text.to(self.fc.weight.device)
         
-        # Unpack sequence
-        output, output_lengths = nn.utils.rnn.pad_packed_sequence(
-            packed_output, batch_first=True
-        )  # (batch_size, seq_len, hidden_dim*2)
+        # Make our model more robust to different calling patterns
+        if text_lengths is None:
+            # If lengths not provided, calculate from input by counting non-zero tokens
+            text_lengths = torch.sum(text != 0, dim=1).to(text.device)
         
-        # Apply attention
+        # Ensure text_lengths is on the right device
+        if text_lengths.device != text.device:
+            text_lengths = text_lengths.to(text.device)
+        
+        if mask is None:
+            # If mask not provided, create it from input (1 for real tokens, 0 for padding)
+            mask = (text != 0).to(text.device)
+        
+        # Sort sequences by true length (not padded length) for pack_padded_sequence
+        lengths_sorted, sort_idx = text_lengths.sort(descending=True)
+        text_sorted = text[sort_idx]
+        mask_sorted = mask[sort_idx]
+        
+        # Embedding layer
+        embedded = self.dropout(self.embedding(text_sorted))  # [batch_size, max_seq_length, embedding_dim]
+        
+        # Pack sequences using true lengths (ignores padding for LSTM computation)
+        try:
+            packed_embedded = nn.utils.rnn.pack_padded_sequence(
+                embedded, lengths_sorted.cpu(), batch_first=True
+            )
+            
+            # LSTM processes only the real tokens, not padding
+            packed_output, (hidden, cell) = self.lstm(packed_embedded)
+            
+            # Unpack to get regular tensor, padded to max length in batch
+            output, _ = nn.utils.rnn.pad_packed_sequence(
+                packed_output, batch_first=True
+            )  # [batch_size, max_seq_length, hidden_dim*2]
+        except Exception as e:
+            print(f"Error in LSTM processing: {e}")
+            print(f"Lengths: {lengths_sorted}")
+            print(f"Text shape: {text_sorted.shape}")
+            # Fall back to standard LSTM without packing
+            output, (hidden, cell) = self.lstm(embedded)
+        
+        # Restore original sequence order
+        _, unsort_idx = sort_idx.sort()
+        output = output[unsort_idx]
+        mask = mask_sorted[unsort_idx]
+        
+        # Apply attention (mask ensures attention only looks at real tokens)
         context, attention_weights = self.attention(output, mask)
         
-        # Dropout
+        # Final layers
         context = self.dropout(context)
-        
-        # Output layer
-        output = torch.sigmoid(self.fc(context))
+        output = self.fc(context)  # Return logits without sigmoid
         
         return output.squeeze(), attention_weights
     

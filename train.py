@@ -12,6 +12,7 @@ import seaborn as sns
 import mlflow
 from mlflow.tracking import MlflowClient
 from datetime import datetime
+import json
 
 from data_loader import create_dataloaders
 from models.lstm_with_attention import BiLSTMAttention
@@ -271,22 +272,23 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
-    # Load preprocessed data
-    with open('data/processed_data/train_data.pkl', 'rb') as f:
-        train_data = pickle.load(f)
-    with open('data/processed_data/val_data.pkl', 'rb') as f:
-        val_data = pickle.load(f)
-    with open('data/processed_data/test_data.pkl', 'rb') as f:
-        test_data = pickle.load(f)
-    with open('data/processed_data/embedding_matrix.pkl', 'rb') as f:
-        embedding_matrix = pickle.load(f)
-    with open('data/processed_data/config.pkl', 'rb') as f:
-        config = pickle.load(f)
+    # Load preprocessed data from NumPy files
+    X_train = np.load('data/processed_data/X_train.npy')
+    X_val = np.load('data/processed_data/X_val.npy')
+    X_test = np.load('data/processed_data/X_test.npy')
+    y_train = np.load('data/processed_data/y_train.npy')
+    y_val = np.load('data/processed_data/y_val.npy')
+    y_test = np.load('data/processed_data/y_test.npy')
+    embedding_matrix = np.load('data/processed_data/embedding_matrix.npy')
+    
+    # Load config from JSON
+    with open('configs/model_config.json', 'r') as f:
+        config = json.load(f)
     
     # Create data loaders
     train_loader, val_loader, test_loader = create_dataloaders(
-        train_data['X'], val_data['X'], test_data['X'],
-        train_data['y'], val_data['y'], test_data['y'],
+        X_train.tolist(), X_val.tolist(), X_test.tolist(),
+        y_train.tolist(), y_val.tolist(), y_test.tolist(),
         batch_size=32
     )
     

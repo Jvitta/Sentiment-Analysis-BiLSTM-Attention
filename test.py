@@ -1,9 +1,11 @@
 import torch
 import pickle
+import json
 from tqdm import tqdm
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
 import matplotlib.pyplot as plt
 import seaborn as sns
+import numpy as np
 
 from data_loader import create_dataloaders
 from models.lstm_with_attention import BiLSTMAttention
@@ -71,15 +73,20 @@ def main():
     # Load preprocessed data
     with open('data/processed_data/test_data.pkl', 'rb') as f:
         test_data = pickle.load(f)
-    with open('data/processed_data/embedding_matrix.pkl', 'rb') as f:
-        embedding_matrix = pickle.load(f)
-    with open('data/processed_data/config.pkl', 'rb') as f:
-        config = pickle.load(f)
+    with open('configs/model_config.json', 'r') as f:
+        config = json.load(f)
+    
+    # Load embedding matrix
+    embedding_matrix = np.load('data/processed_data/embedding_matrix.npy')
+    
+    # Load test data from NumPy files
+    X_test = np.load('data/processed_data/X_test.npy')
+    y_test = np.load('data/processed_data/y_test.npy')
     
     # Create test data loader
     _, _, test_loader = create_dataloaders(
-        None, None, test_data['X'],
-        None, None, test_data['y'],
+        X_test.tolist(), [], [],  # Empty validation and train sets
+        y_test.tolist(), [], [],
         batch_size=32
     )
     

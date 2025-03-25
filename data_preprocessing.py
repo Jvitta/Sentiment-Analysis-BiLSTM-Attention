@@ -15,6 +15,7 @@ import pickle
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import seaborn as sns
+import json
 
 # Download necessary NLTK data
 try:
@@ -397,25 +398,25 @@ class SentimentDataProcessor:
         return X_train, X_val, X_test, y_train, y_val, y_test, df_train, df_val, df_test
     
     def save_preprocessed_data(self, X_train, X_val, X_test, y_train, y_val, y_test):
-        """Save preprocessed data to files."""
+        """Save preprocessed data to NumPy files."""
         # Ensure data directory exists
         os.makedirs('data/processed_data', exist_ok=True)
         
-        # Save data splits
-        train_data = {'X': X_train, 'y': y_train}
-        val_data = {'X': X_val, 'y': y_val}
-        test_data = {'X': X_test, 'y': y_test}
+        # Convert lists to NumPy arrays for X data
+        X_train_array = np.array(X_train, dtype=np.int32)
+        X_val_array = np.array(X_val, dtype=np.int32)
+        X_test_array = np.array(X_test, dtype=np.int32)
         
-        with open('data/processed_data/train_data.pkl', 'wb') as f:
-            pickle.dump(train_data, f)
-        with open('data/processed_data/val_data.pkl', 'wb') as f:
-            pickle.dump(val_data, f)
-        with open('data/processed_data/test_data.pkl', 'wb') as f:
-            pickle.dump(test_data, f)
+        # Save data splits directly as NumPy arrays
+        np.save('data/processed_data/X_train.npy', X_train_array)
+        np.save('data/processed_data/X_val.npy', X_val_array)
+        np.save('data/processed_data/X_test.npy', X_test_array)
+        np.save('data/processed_data/y_train.npy', y_train)
+        np.save('data/processed_data/y_val.npy', y_val)
+        np.save('data/processed_data/y_test.npy', y_test)
         
-        # Save embedding matrix
-        with open('data/processed_data/embedding_matrix.pkl', 'wb') as f:
-            pickle.dump(self.embedding_matrix, f)
+        # Save embedding matrix as NumPy array
+        np.save('data/processed_data/embedding_matrix.npy', self.embedding_matrix)
         
         # Save configuration
         config = {
@@ -423,10 +424,21 @@ class SentimentDataProcessor:
             'embedding_dim': self.embedding_dim,
             'vocab_size': len(self.word_to_idx)
         }
-        with open('data/processed_data/config.pkl', 'wb') as f:
-            pickle.dump(config, f)
         
-        print("Preprocessed data saved successfully!")
+        # Ensure configs directory exists
+        os.makedirs('configs', exist_ok=True)
+        
+        with open('configs/model_config.json', 'w') as f:
+            json.dump(config, f, indent=4)
+        
+        # Optional: Save vocabulary dictionaries for reference
+        with open('data/processed_data/word_to_idx.json', 'w') as f:
+            # Convert int keys to strings for JSON compatibility
+            json.dump(self.word_to_idx, f, indent=4)
+        
+        print("Preprocessed data saved successfully as NumPy arrays!")
+        print("Configuration saved to configs/model_config.json")
+        print("Vocabulary mapping saved to data/processed_data/word_to_idx.json")
 
 
 def main():

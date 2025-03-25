@@ -109,4 +109,4 @@ class BiLSTMAttention(nn.Module):
     def load_pretrained_embeddings(self, embedding_matrix):
         """Load pre-trained embeddings into the embedding layer."""
         self.embedding.weight.data.copy_(torch.from_numpy(embedding_matrix))
-        print("Loaded pre-trained embeddings")
+        print("Loaded pre-trained embeddings") 

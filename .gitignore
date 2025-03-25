@@ -1,0 +1,12 @@
+# Ignore data directory contents but keep .dvc files
+/data/*
+!/data/*.dvc
+!/data/processed_data
+/data/processed_data/*
+!/data/processed_data/*.dvc
+
+# Python
+/__pycache__/
+*.pyc
+/.env
+

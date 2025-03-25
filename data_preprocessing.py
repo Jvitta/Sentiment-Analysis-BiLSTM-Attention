@@ -206,12 +206,6 @@ class SentimentDataProcessor:
         # Ensure data directory exists
         os.makedirs('data', exist_ok=True)
         
-        # Save corrections to file
-        with open('data/word_corrections.csv', 'w', encoding='utf-8') as f:
-            f.write("Original Word,Correction,Frequency in Dataset\n")
-            for word, correction in sorted(corrections.items(), key=lambda x: word_counts[x[0]], reverse=True):
-                f.write(f"{word},{correction},{word_counts[word]}\n")
-        
         # Save detailed report with assessment
         with open('data/correction_report.txt', 'w', encoding='utf-8') as f:
             f.write("WORD CORRECTION REPORT\n")
@@ -427,155 +421,37 @@ class SentimentDataProcessor:
         print("Preprocessed data saved successfully!")
 
 
-class SentimentDataset(Dataset):
-    """Dataset class for sentiment analysis."""
-    def __init__(self, sequences, labels, pad_idx=0):
-        self.sequences = sequences
-        self.labels = labels
-        self.pad_idx = pad_idx
+def main():
+    """Main function for data preprocessing."""
+    # File paths
+    file_paths = [
+        'data/amazon_cells_labelled.txt',
+        'data/imdb_labelled.txt',
+        'data/yelp_labelled.txt'
+    ]
     
-    def __len__(self):
-        return len(self.sequences)
-    
-    def __getitem__(self, idx):
-        return self.sequences[idx], self.labels[idx]
-    
-    @staticmethod
-    def collate_fn(batch, pad_idx=0):
-        """Collate function for DataLoader."""
-        sequences, labels = zip(*batch)
-        
-        # Convert sequences to tensors and pad
-        sequences = [torch.tensor(seq, dtype=torch.long) for seq in sequences]
-        padded_sequences = pad_sequence(sequences, batch_first=True, padding_value=pad_idx)
-        
-        # Create sequence lengths tensor
-        lengths = torch.tensor([len(seq) for seq in sequences], dtype=torch.long)
-        
-        # Convert labels to tensor
-        labels = torch.tensor(labels, dtype=torch.float)
-        
-        return padded_sequences, lengths, labels
-
-
-def create_dataloaders(X_train, X_val, X_test, y_train, y_val, y_test, batch_size=32, pad_idx=0):
-    """Create DataLoaders for train, validation and test sets."""
-    # Create datasets
-    train_dataset = SentimentDataset(X_train, y_train, pad_idx)
-    val_dataset = SentimentDataset(X_val, y_val, pad_idx)
-    test_dataset = SentimentDataset(X_test, y_test, pad_idx)
-    
-    # Create data loaders
-    train_loader = DataLoader(
-        train_dataset, 
-        batch_size=batch_size, 
-        shuffle=True, 
-        collate_fn=lambda b: SentimentDataset.collate_fn(b, pad_idx)
+    # Initialize data processor
+    processor = SentimentDataProcessor(
+        file_paths=file_paths,
+        glove_path='data/glove.6B.100d.txt',
+        max_seq_length=26,
+        embedding_dim=100,
+        correct_spelling=True
     )
     
-    val_loader = DataLoader(
-        val_dataset, 
-        batch_size=batch_size, 
-        shuffle=False, 
-        collate_fn=lambda b: SentimentDataset.collate_fn(b, pad_idx)
-    )
+    # Process data
+    X, y, df = processor.process_data()
     
-    test_loader = DataLoader(
-        test_dataset, 
-        batch_size=batch_size, 
-        shuffle=False, 
-        collate_fn=lambda b: SentimentDataset.collate_fn(b, pad_idx)
-    )
+    # Split data
+    X_train, X_val, X_test, y_train, y_val, y_test, df_train, df_val, df_test = processor.train_val_test_split(
+        X, y, df, train_size=0.8, val_size=0.1, test_size=0.1)
     
-    return train_loader, val_loader, test_loader
-
-
-def load_preprocessed_data():
-    """Load preprocessed data from files."""
-    try:
-        # Load data splits
-        with open('data/processed_data/train_data.pkl', 'rb') as f:
-            train_data = pickle.load(f)
-        with open('data/processed_data/val_data.pkl', 'rb') as f:
-            val_data = pickle.load(f)
-        with open('data/processed_data/test_data.pkl', 'rb') as f:
-            test_data = pickle.load(f)
-        
-        # Load embedding matrix
-        with open('data/processed_data/embedding_matrix.pkl', 'rb') as f:
-            embedding_matrix = pickle.load(f)
-        
-        # Load configuration
-        with open('data/processed_data/config.pkl', 'rb') as f:
-            config = pickle.load(f)
-        
-        print("Preprocessed data loaded successfully!")
-        return train_data, val_data, test_data, embedding_matrix, config
-        
-    except FileNotFoundError:
-        print("Preprocessed data not found. Please run preprocessing first.")
-        return None, None, None, None, None
-
-
-def main(preprocess=True, data_dir='data/processed_data'):
-    """
-    Main function for data preprocessing.
+    # Save preprocessed data
+    processor.save_preprocessed_data(X_train, X_val, X_test, y_train, y_val, y_test)
     
-    Args:
-        preprocess (bool): Whether to preprocess data from scratch
-        data_dir (str): Directory to save/load preprocessed data
-    """
-    if preprocess:
-        # File paths
-        file_paths = [
-            'data/amazon_cells_labelled.txt',
-            'data/imdb_labelled.txt',
-            'data/yelp_labelled.txt'
-        ]
-        
-        # Initialize data processor
-        processor = SentimentDataProcessor(
-            file_paths=file_paths,
-            glove_path='data/glove.6B.100d.txt',
-            max_seq_length=26,
-            embedding_dim=100,
-            correct_spelling=True
-        )
-        
-        # Process data
-        X, y, df = processor.process_data()
-        
-        # Split data
-        X_train, X_val, X_test, y_train, y_val, y_test, df_train, df_val, df_test = processor.train_val_test_split(
-            X, y, df, train_size=0.8, val_size=0.1, test_size=0.1)
-        
-        # Save preprocessed data
-        processor.save_preprocessed_data(X_train, X_val, X_test, y_train, y_val, y_test)
-        
-        print("Data preprocessing completed successfully!")
-        return X_train, X_val, X_test, y_train, y_val, y_test, processor.embedding_matrix
-    
-    else:
-        # Load preprocessed data
-        print(f"Loading preprocessed data from {data_dir}...")
-        data = load_preprocessed_data()
-        X_train, X_val, X_test = data[0], data[1], data[2]
-        y_train, y_val, y_test = data[3], data[4], data[5]
-        embedding_matrix = data[6]
-        config = data[7]
-        
-        print(f"Loaded data with vocabulary size: {config['vocab_size']}")
-        print(f"Train size: {len(X_train)}, Validation size: {len(X_val)}, Test size: {len(X_test)}")
-        
-        return X_train, X_val, X_test, y_train, y_val, y_test, embedding_matrix
+    print("Data preprocessing completed successfully!")
+    return X_train, X_val, X_test, y_train, y_val, y_test, processor.embedding_matrix
 
 
 if __name__ == "__main__":
-    # Example: Process data from scratch
-    # main(preprocess=True)
-    
-    # Example: Load preprocessed data
-    # main(preprocess=False)
-    
-    # Default behavior: preprocess data
     main()

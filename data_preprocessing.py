@@ -133,14 +133,9 @@ class SentimentDataProcessor:
         sym_spell = SymSpell(max_dictionary_edit_distance=2, prefix_length=7)
         dictionary_path = pkg_resources.resource_filename("symspellpy", "frequency_dictionary_en_82_765.txt")
         
-        # Load dictionary or handle if file not found
-        try:
-            sym_spell.load_dictionary(dictionary_path, term_index=0, count_index=1)
-            print(f"Loaded SymSpell dictionary with {sym_spell.word_count} words")
-        except FileNotFoundError:
-            print(f"SymSpell dictionary not found at {dictionary_path}")
-            # Fall back to basic SpellChecker if SymSpell dictionary is not available
-            return self._correct_with_basic_spellchecker(words_not_in_glove, glove_vocab, word_counts)
+        # Load dictionary
+        sym_spell.load_dictionary(dictionary_path, term_index=0, count_index=1)
+        print(f"Loaded SymSpell dictionary with {sym_spell.word_count} words")
         
         # Add common domain-specific terms (technology, brands, food) to avoid incorrect corrections
         domain_terms = [
@@ -236,32 +231,6 @@ class SentimentDataProcessor:
         
         # Visualize corrections
         self.visualize_corrections(words_not_in_glove, corrections, word_counts)
-        
-        return corrections
-    
-    def _correct_with_basic_spellchecker(self, words_not_in_glove, glove_vocab, word_counts):
-        """Fallback method using the basic PySpellChecker."""
-        print("Falling back to basic SpellChecker...")
-        spell = SpellChecker()
-        corrections = {}
-        
-        for word in tqdm(words_not_in_glove):
-            # Skip very short words (likely abbreviations)
-            if len(word) <= 2:
-                continue
-            
-            # Skip words with numbers (likely model numbers, etc.)
-            if any(c.isdigit() for c in word):
-                continue
-            
-            # Get correction
-            correction = spell.correction(word)
-            
-            # If a correction is found and it's different from the original word
-            if correction and correction != word and correction in glove_vocab:
-                corrections[word] = correction
-        
-        print(f"Found corrections for {len(corrections)} words with basic SpellChecker.")
         
         return corrections
     
@@ -429,46 +398,33 @@ class SentimentDataProcessor:
         
         return X_train, X_val, X_test, y_train, y_val, y_test, df_train, df_val, df_test
     
-    def save_preprocessed_data(self, X_train, X_val, X_test, y_train, y_val, y_test, output_dir='data/processed_data'):
-        """Save preprocessed data for later use."""
-        os.makedirs(output_dir, exist_ok=True)
+    def save_preprocessed_data(self, train_data, val_data, test_data):
+        """Save preprocessed data to files."""
+        # Ensure data directory exists
+        os.makedirs('data/processed_data', exist_ok=True)
         
-        # Save data splits (X and y together)
-        train_data = {'X': X_train, 'y': y_train}
-        val_data = {'X': X_val, 'y': y_val}
-        test_data = {'X': X_test, 'y': y_test}
-        
-        with open(f'{output_dir}/train_data.pkl', 'wb') as f:
+        # Save data splits
+        with open('data/processed_data/train_data.pkl', 'wb') as f:
             pickle.dump(train_data, f)
-        with open(f'{output_dir}/val_data.pkl', 'wb') as f:
+        with open('data/processed_data/val_data.pkl', 'wb') as f:
             pickle.dump(val_data, f)
-        with open(f'{output_dir}/test_data.pkl', 'wb') as f:
+        with open('data/processed_data/test_data.pkl', 'wb') as f:
             pickle.dump(test_data, f)
         
-        # Save vocabulary and embeddings
-        vocab_data = {
-            'word_to_idx': self.word_to_idx,
-            'idx_to_word': self.idx_to_word,
-            'embedding_matrix': self.embedding_matrix
-        }
-        with open(f'{output_dir}/vocab_data.pkl', 'wb') as f:
-            pickle.dump(vocab_data, f)
+        # Save embedding matrix
+        with open('data/processed_data/embedding_matrix.pkl', 'wb') as f:
+            pickle.dump(self.embedding_matrix, f)
         
-        # Save corrections
-        with open(f'{output_dir}/word_corrections.pkl', 'wb') as f:
-            pickle.dump(self.word_corrections, f)
-            
-        # Save config
+        # Save configuration
         config = {
-            'max_seq_length': self.max_seq_length,
+            'max_length': self.max_seq_length,
             'embedding_dim': self.embedding_dim,
-            'vocab_size': len(self.word_to_idx),
-            'num_classes': 2
+            'vocab_size': len(self.word_to_idx)
         }
-        with open(f'{output_dir}/config.pkl', 'wb') as f:
+        with open('data/processed_data/config.pkl', 'wb') as f:
             pickle.dump(config, f)
         
-        print(f"Saved preprocessed data to {output_dir}/")
+        print("Preprocessed data saved successfully!")
 
 
 class SentimentDataset(Dataset):
@@ -534,42 +490,31 @@ def create_dataloaders(X_train, X_val, X_test, y_train, y_val, y_test, batch_siz
     return train_loader, val_loader, test_loader
 
 
-def load_preprocessed_data(data_dir='data/processed_data'):
-    """Load preprocessed data."""
-    # Load data splits
-    with open(f'{data_dir}/train_data.pkl', 'rb') as f:
-        train_data = pickle.load(f)
-    with open(f'{data_dir}/val_data.pkl', 'rb') as f:
-        val_data = pickle.load(f)
-    with open(f'{data_dir}/test_data.pkl', 'rb') as f:
-        test_data = pickle.load(f)
-    
-    X_train, y_train = train_data['X'], train_data['y']
-    X_val, y_val = val_data['X'], val_data['y']
-    X_test, y_test = test_data['X'], test_data['y']
-    
-    # Load vocabulary and embeddings
-    with open(f'{data_dir}/vocab_data.pkl', 'rb') as f:
-        vocab_data = pickle.load(f)
-    
-    word_to_idx = vocab_data['word_to_idx']
-    idx_to_word = vocab_data['idx_to_word']
-    embedding_matrix = vocab_data['embedding_matrix']
-    
-    # Load config
-    with open(f'{data_dir}/config.pkl', 'rb') as f:
-        config = pickle.load(f)
-    
-    # Optional: load word corrections if needed
-    word_corrections = {}
+def load_preprocessed_data():
+    """Load preprocessed data from files."""
     try:
-        with open(f'{data_dir}/word_corrections.pkl', 'rb') as f:
-            word_corrections = pickle.load(f)
+        # Load data splits
+        with open('data/processed_data/train_data.pkl', 'rb') as f:
+            train_data = pickle.load(f)
+        with open('data/processed_data/val_data.pkl', 'rb') as f:
+            val_data = pickle.load(f)
+        with open('data/processed_data/test_data.pkl', 'rb') as f:
+            test_data = pickle.load(f)
+        
+        # Load embedding matrix
+        with open('data/processed_data/embedding_matrix.pkl', 'rb') as f:
+            embedding_matrix = pickle.load(f)
+        
+        # Load configuration
+        with open('data/processed_data/config.pkl', 'rb') as f:
+            config = pickle.load(f)
+        
+        print("Preprocessed data loaded successfully!")
+        return train_data, val_data, test_data, embedding_matrix, config
+        
     except FileNotFoundError:
-        print("Word corrections file not found.")
-    
-    return (X_train, X_val, X_test, y_train, y_val, y_test, 
-            word_to_idx, idx_to_word, embedding_matrix, config, word_corrections)
+        print("Preprocessed data not found. Please run preprocessing first.")
+        return None, None, None, None, None
 
 
 def main(preprocess=True, data_dir='data/processed_data'):
@@ -605,25 +550,24 @@ def main(preprocess=True, data_dir='data/processed_data'):
             X, y, df, train_size=0.8, val_size=0.1, test_size=0.1)
         
         # Save preprocessed data
-        processor.save_preprocessed_data(X_train, X_val, X_test, y_train, y_val, y_test, output_dir=data_dir)
+        processor.save_preprocessed_data(X_train, X_val, X_test, y_train, y_val, y_test)
         
         print("Data preprocessing completed successfully!")
-        return X_train, X_val, X_test, y_train, y_val, y_test, processor.word_to_idx, processor.embedding_matrix
+        return X_train, X_val, X_test, y_train, y_val, y_test, processor.embedding_matrix
     
     else:
         # Load preprocessed data
         print(f"Loading preprocessed data from {data_dir}...")
-        data = load_preprocessed_data(data_dir)
+        data = load_preprocessed_data()
         X_train, X_val, X_test = data[0], data[1], data[2]
         y_train, y_val, y_test = data[3], data[4], data[5]
-        word_to_idx, idx_to_word = data[6], data[7]
-        embedding_matrix = data[8]
-        config = data[9]
+        embedding_matrix = data[6]
+        config = data[7]
         
         print(f"Loaded data with vocabulary size: {config['vocab_size']}")
         print(f"Train size: {len(X_train)}, Validation size: {len(X_val)}, Test size: {len(X_test)}")
         
-        return X_train, X_val, X_test, y_train, y_val, y_test, word_to_idx, embedding_matrix
+        return X_train, X_val, X_test, y_train, y_val, y_test, embedding_matrix
 
 
 if __name__ == "__main__":

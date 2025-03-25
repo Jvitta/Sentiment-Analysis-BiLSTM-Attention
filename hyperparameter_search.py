@@ -110,8 +110,6 @@ def find_learning_rate(data_path, batch_size=32, min_lr=1e-7, max_lr=10, num_ite
     with open(config_path, 'r') as f:
         config = json.load(f)
     
-    # No need to convert to numpy arrays since data is already in NumPy format
-    
     # Convert to PyTorch tensors
     X_train = torch.tensor(X_train, dtype=torch.long)
     y_train = torch.tensor(y_train, dtype=torch.float)

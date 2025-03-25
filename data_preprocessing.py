@@ -320,6 +320,10 @@ class SentimentDataProcessor:
                 # Get ID (or UNK if not in vocab)
                 idx = self.word_to_idx.get(token, self.word_to_idx['<UNK>'])
                 token_ids.append(idx)
+            
+            # Pad if necessary (0 is the padding token)
+            if len(token_ids) < self.max_seq_length:
+                token_ids.extend([0] * (self.max_seq_length - len(token_ids)))
                 
             processed.append(token_ids)
         return processed
@@ -392,12 +396,16 @@ class SentimentDataProcessor:
         
         return X_train, X_val, X_test, y_train, y_val, y_test, df_train, df_val, df_test
     
-    def save_preprocessed_data(self, train_data, val_data, test_data):
+    def save_preprocessed_data(self, X_train, X_val, X_test, y_train, y_val, y_test):
         """Save preprocessed data to files."""
         # Ensure data directory exists
         os.makedirs('data/processed_data', exist_ok=True)
         
         # Save data splits
+        train_data = {'X': X_train, 'y': y_train}
+        val_data = {'X': X_val, 'y': y_val}
+        test_data = {'X': X_test, 'y': y_test}
+        
         with open('data/processed_data/train_data.pkl', 'wb') as f:
             pickle.dump(train_data, f)
         with open('data/processed_data/val_data.pkl', 'wb') as f:

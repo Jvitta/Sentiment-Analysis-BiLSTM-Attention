@@ -53,6 +53,9 @@ class BiLSTMAttention(nn.Module):
         
         # Initialize weights
         self._init_weights()
+        
+        # Store embedding matrix for loading pre-trained embeddings
+        self.embedding_matrix = None
     
     def _init_weights(self):
         """Initialize model weights."""
@@ -108,5 +111,27 @@ class BiLSTMAttention(nn.Module):
     
     def load_pretrained_embeddings(self, embedding_matrix):
         """Load pre-trained embeddings into the embedding layer."""
+        self.embedding_matrix = embedding_matrix
         self.embedding.weight.data.copy_(torch.from_numpy(embedding_matrix))
-        print("Loaded pre-trained embeddings")
+        self.embedding.weight.requires_grad = False  # Freeze embeddings
+    
+    def predict(self, dataloader, device):
+        """Generate predictions for a dataloader."""
+        self.eval()
+        all_preds = []
+        
+        with torch.no_grad():
+            for batch in dataloader:
+                text, lengths, _ = batch
+                text = text.to(device)
+                lengths = lengths.to(device)
+                
+                # Create mask for attention
+                mask = (text != 0).to(device)
+                
+                # Forward pass
+                predictions, _ = self(text, lengths, mask)
+                predictions = (predictions > 0.5).float()
+                all_preds.extend(predictions.cpu().numpy())
+        
+        return all_preds

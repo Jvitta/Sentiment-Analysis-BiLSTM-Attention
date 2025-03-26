@@ -1,0 +1,12 @@
+{
+  "batch_size": 8,
+  "learning_rate": 0.0008008032554962883,
+  "weight_decay": 9.737287649867236e-05,
+  "hidden_dim": 256,
+  "num_layers": 2,
+  "dropout": 0.39637717822392393,
+  "use_lr_scheduler": true,
+  "scheduler_patience": 4,
+  "scheduler_factor": 0.21402376366182954,
+  "num_epochs": 50
+}

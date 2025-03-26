@@ -67,6 +67,40 @@ def plot_top_configs(top_results):
         pass
 
 
+def find_steepest_gradient(lr_history, loss_history, skip_start=5, skip_end=5):
+    """Find the learning rate with the steepest gradient (negative slope).
+    
+    Args:
+        lr_history: List of learning rates
+        loss_history: List of corresponding losses
+        skip_start: Number of points to skip at the beginning
+        skip_end: Number of points to skip at the end
+        
+    Returns:
+        The learning rate with the steepest negative gradient (best for learning)
+    """
+    # Convert to numpy arrays
+    lr = np.array(lr_history)
+    loss = np.array(loss_history)
+    
+    # Skip the first and last few points
+    if skip_end > 0:
+        lr = lr[skip_start:-skip_end]
+        loss = loss[skip_start:-skip_end]
+    else:
+        lr = lr[skip_start:]
+        loss = loss[skip_start:]
+    
+    # Calculate gradients with respect to log(lr)
+    gradients = np.gradient(loss, np.log10(lr))
+    
+    # Find the point with the steepest negative gradient
+    steepest_idx = np.argmin(gradients)
+    
+    # Return the corresponding learning rate
+    return lr[steepest_idx]
+
+
 def find_learning_rate(data_path, batch_size=32, min_lr=1e-7, max_lr=10, num_iter=100):
     """
     Use the LR Finder to discover the optimal learning rate for the model.
@@ -110,18 +144,18 @@ def find_learning_rate(data_path, batch_size=32, min_lr=1e-7, max_lr=10, num_ite
     with open(config_path, 'r') as f:
         config = json.load(f)
     
-    # Convert to PyTorch tensors
-    X_train = torch.tensor(X_train, dtype=torch.long)
-    y_train = torch.tensor(y_train, dtype=torch.float)
-    X_val = torch.tensor(X_val, dtype=torch.long)
-    y_val = torch.tensor(y_val, dtype=torch.float)
+    # Convert to PyTorch tensors with explicit types
+    X_train = torch.tensor(X_train, dtype=torch.long)  # Long for embedding indices
+    y_train = torch.tensor(y_train, dtype=torch.float32)  # Float for BCEWithLogitsLoss
+    X_val = torch.tensor(X_val, dtype=torch.long)  # Long for embedding indices
+    y_val = torch.tensor(y_val, dtype=torch.float32)  # Float for BCEWithLogitsLoss
     
-    # Create data loaders
-    train_loader, val_loader, _ = create_dataloaders(
-        X_train.tolist(), X_val.tolist(), [],  # Empty test set since we don't need it
-        y_train.tolist(), y_val.tolist(), [],
-        batch_size=batch_size
-    )
+    # Create datasets and dataloaders for LRFinder
+    train_dataset = TensorDataset(X_train, y_train)
+    val_dataset = TensorDataset(X_val, y_val)
+    
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
     
     # Initialize model
     # For learning rate finder, using CPU can be more stable
@@ -137,7 +171,7 @@ def find_learning_rate(data_path, batch_size=32, min_lr=1e-7, max_lr=10, num_ite
     ).to(device)
     
     # Initialize optimizer and loss
-    criterion = nn.BCEWithLogitsLoss()  # Use BCEWithLogitsLoss instead of BCELoss
+    criterion = nn.BCEWithLogitsLoss()  # BCEWithLogitsLoss will use input tensor types
     optimizer = optim.Adam(model.parameters(), lr=1e-5, weight_decay=1e-5)
     
     # Create a simple adapter for our model during LR finding
@@ -147,25 +181,31 @@ def find_learning_rate(data_path, batch_size=32, min_lr=1e-7, max_lr=10, num_ite
             self.model = model
             
         def forward(self, batch):
-            # Handle batch from DataLoader which is a tuple (text, lengths, labels)
-            text, lengths = batch[0], batch[1]
+            # When using TensorDataset, batch will be just the text tensor
+            text = batch
             
-            # Debug zero lengths
-            zero_lengths = (lengths == 0).sum().item()
-            if zero_lengths > 0:
-                print(f"Warning: Found {zero_lengths} sequences with zero length")
-                print(f"First few lengths: {lengths[:10]}")
-                print(f"Full length tensor shape: {lengths.shape}")
-                # Ensure all lengths are at least 1 to avoid LSTM errors
-                lengths = torch.clamp(lengths, min=1)
+            # Ensure text is long type for embeddings
+            if text.dtype != torch.long:
+                text = text.long()
             
-            # Create mask
-            mask = (text != 0)
+            # Calculate lengths from the text (counting non-padding tokens)
+            lengths = torch.sum(text != 0, dim=1).long()
             
-            # Get model prediction - our model returns (output, attention_weights) tuple
-            outputs, _ = self.model(text, lengths, mask)
+            # Create mask for attention (1 for real tokens, 0 for padding)
+            mask = (text != 0).bool()
             
-            # Return just the first element (logits)
+            # Get model prediction
+            outputs, attention = self.model(text, lengths, mask)
+            
+            # Ensure outputs are float32
+            if not isinstance(outputs, torch.Tensor):
+                outputs = torch.tensor(outputs, dtype=torch.float32)
+            elif outputs.dtype != torch.float32:
+                outputs = outputs.float()
+            
+            # Squeeze any extra dimensions
+            outputs = outputs.squeeze()
+            
             return outputs
     
     # Wrap our model in the adapter
@@ -183,19 +223,31 @@ def find_learning_rate(data_path, batch_size=32, min_lr=1e-7, max_lr=10, num_ite
             train_loader, 
             val_loader=val_loader, 
             end_lr=min(0.1, max_lr),  # Use a more conservative upper bound (0.1)
-            num_iter=min(50, num_iter),  # Reduce number of iterations for stability
+            num_iter=min(150, num_iter),  # Reduce number of iterations for stability
             step_mode="exp",
             diverge_th=5.0  # Increase divergence threshold to avoid early stopping
         )
         
         # Get suggestion
-        if len(lr_finder.history['lr']) > 10:
-            # Find learning rate with steepest gradient
-            suggested_lr = lr_finder.steepest_gradient(skip_start=5, skip_end=5)
-            if suggested_lr is None:
-                # If steepest gradient fails, use minimum loss
-                suggested_lr = lr_finder.get_best_lr(skip_start=5, skip_end=5)
-            print(f"Suggested learning rate: {suggested_lr:.8f}")
+        if len(lr_finder.history['lr']) > 12:  # Need at least 12 points for stable gradient calculation
+            # Use steepest gradient approach
+            steepest_lr = find_steepest_gradient(
+                lr_finder.history['lr'], 
+                lr_finder.history['loss'],
+                skip_start=5, 
+                skip_end=5
+            )
+            
+            # Also find minimum loss for comparison
+            min_loss_idx = np.argmin(lr_finder.history['loss'])
+            min_loss_lr = lr_finder.history['lr'][min_loss_idx]
+            
+            print(f"LR suggestion based on steepest gradient: {steepest_lr:.2E}")
+            print(f"LR suggestion based on minimum loss: {min_loss_lr:.2E}")
+            
+            # Use steepest gradient if valid, otherwise fall back to minimum loss
+            suggested_lr = steepest_lr if not np.isnan(steepest_lr) else min_loss_lr
+            print(f"Using suggested LR: {suggested_lr:.2E}")
         else:
             # If we don't have enough data points, use a reasonable default
             suggested_lr = 1e-4
@@ -249,7 +301,7 @@ def find_learning_rate(data_path, batch_size=32, min_lr=1e-7, max_lr=10, num_ite
     with open(config_path, 'w') as f:
         json.dump(lr_config, f, indent=2)
     
-    print(f"Configuration with suggested learning rate saved to {config_path}")
+    print(f"The Configuration with suggested learning rate saved to {config_path}")
     
     # Also save to a standard name for easy reference
     standard_config_path = os.path.join('configs', 'lr_finder_config.json')
@@ -268,14 +320,12 @@ def find_learning_rate(data_path, batch_size=32, min_lr=1e-7, max_lr=10, num_ite
     
     return suggested_lr
 
-def bayesian_search(data_path, num_folds=4, test_fold=5, n_trials=25, timeout=None):
+def bayesian_search(data_path, n_trials=25, timeout=None):
     """
     Perform Bayesian hyperparameter optimization using Optuna
     
     Args:
         data_path: Path to preprocessed data
-        num_folds: Number of folds to use for cross-validation
-        test_fold: Fold to reserve for final testing
         n_trials: Number of trials to run
         timeout: Stop study after the given number of seconds (None means no timeout)
     
@@ -286,77 +336,237 @@ def bayesian_search(data_path, num_folds=4, test_fold=5, n_trials=25, timeout=No
     print("Starting Bayesian hyperparameter optimization...")
     
     # Set up MLflow experiment
-    experiment_name = "esc50_bayesian_optimization"
+    experiment_name = "sentiment_analysis_bayesian_optimization"
     try:
         experiment_id = mlflow.create_experiment(experiment_name)
     except:
         experiment_id = mlflow.get_experiment_by_name(experiment_name).experiment_id
     
     mlflow.set_experiment(experiment_name)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # Load data
+    X_train = np.load(os.path.join(data_path, 'X_train.npy'))
+    X_val = np.load(os.path.join(data_path, 'X_val.npy'))
+    y_train = np.load(os.path.join(data_path, 'y_train.npy'))
+    y_val = np.load(os.path.join(data_path, 'y_val.npy'))
+    
+    # Load config from JSON
+    config_path = os.path.join('configs', 'model_config.json')
+    with open(config_path, 'r') as f:
+        model_config = json.load(f)
     
     # Define the objective function for Optuna
     def objective(trial):
         # Define hyperparameters to optimize
         config = {
-            'batch_size': trial.suggest_categorical('batch_size', [4, 8, 16, 32]),
-            'learning_rate': 0.00018096,  # Fixed to the optimal value found by LR finder
+            'batch_size': trial.suggest_categorical('batch_size', [8, 16, 32, 64]),
+            'learning_rate': trial.suggest_float('learning_rate', 1e-5, 5e-3, log=True),
             'weight_decay': trial.suggest_float('weight_decay', 1e-6, 1e-3, log=True),
+            'hidden_dim': trial.suggest_categorical('hidden_dim', [128, 256, 512]),
+            'num_layers': trial.suggest_int('num_layers', 1, 3),
+            'dropout': trial.suggest_float('dropout', 0.1, 0.5),
             'use_lr_scheduler': trial.suggest_categorical('use_lr_scheduler', [True, False]),
             'num_epochs': 10  # Fixed for optimization
         }
         
-        # Optional: Add more hyperparameters for better tuning
-        if trial.suggest_categorical('use_dropout', [True, False]):
-            config['dropout_rate'] = trial.suggest_float('dropout_rate', 0.1, 0.5)
-        
         # Optimize scheduling parameters if scheduler is used
         if config['use_lr_scheduler']:
-            config['scheduler_patience'] = trial.suggest_int('scheduler_patience', 3, 10)
+            config['scheduler_patience'] = trial.suggest_int('scheduler_patience', 2, 5)
             config['scheduler_factor'] = trial.suggest_float('scheduler_factor', 0.1, 0.5)
-        
-        # Add data augmentation parameters to test their impact
-        config['use_augmentation'] = trial.suggest_categorical('use_augmentation', [True, False])
-        if config['use_augmentation']:
-            config['aug_strength'] = trial.suggest_float('aug_strength', 0.1, 0.5)
         
         trial_id = trial.number
         
         # Track this configuration with MLflow
-        with mlflow.start_run(run_name=f"trial_{trial_id}"):
+        with mlflow.start_run(run_name=f"trial_{trial_id}", nested=True):
             # Log parameters
             for key, value in config.items():
                 mlflow.log_param(key, value)
             
-            # Evaluate this configuration with cross-validation
-            _, cv_results = cross_validation(config, data_path, num_folds, test_fold)
+            # Convert to PyTorch tensors
+            X_train_tensor = torch.tensor(X_train, dtype=torch.long)
+            y_train_tensor = torch.tensor(y_train, dtype=torch.float32)
+            X_val_tensor = torch.tensor(X_val, dtype=torch.long)
+            y_val_tensor = torch.tensor(y_val, dtype=torch.float32)
             
-            mean_val_acc = cv_results['mean_val_acc']
+            # Create datasets and dataloaders
+            train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
+            val_dataset = TensorDataset(X_val_tensor, y_val_tensor)
             
-            # Log to MLflow
-            mlflow.log_metric("mean_val_acc", mean_val_acc)
-            mlflow.log_metric("std_val_acc", cv_results['std_val_acc'])
+            train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], shuffle=True)
+            val_loader = DataLoader(val_dataset, batch_size=config['batch_size'], shuffle=False)
             
-            # Report intermediate values for pruning
-            trial.report(mean_val_acc, step=1)
+            # Device selection (use CUDA if available)
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            print(f"Using device: {device}")
             
-            # Handle pruning based on the intermediate value
-            if trial.should_prune():
-                raise optuna.exceptions.TrialPruned()
+            # Initialize model
+            model = BiLSTMAttention(
+                vocab_size=model_config['vocab_size'],
+                embedding_dim=model_config['embedding_dim'],
+                hidden_dim=config['hidden_dim'],
+                num_layers=config['num_layers'],
+                dropout=config['dropout'],
+                pad_idx=0
+            ).to(device)
             
-            return mean_val_acc
+            # Load pre-trained embeddings
+            embedding_matrix = np.load(os.path.join(data_path, 'embedding_matrix.npy'))
+            model.load_pretrained_embeddings(embedding_matrix)
+            
+            # Initialize optimizer
+            optimizer = optim.Adam(model.parameters(), 
+                                  lr=config['learning_rate'], 
+                                  weight_decay=config['weight_decay'])
+            
+            # Initialize criterion
+            criterion = nn.BCEWithLogitsLoss()
+            
+            # Initialize learning rate scheduler if enabled
+            if config['use_lr_scheduler']:
+                scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+                    optimizer, 
+                    mode='max', 
+                    factor=config['scheduler_factor'],
+                    patience=config['scheduler_patience'],
+                    verbose=True
+                )
+            else:
+                scheduler = None
+            
+            # Training loop
+            best_val_acc = 0.0
+            best_epoch = 0
+            train_losses = []
+            val_losses = []
+            val_accs = []
+            
+            for epoch in range(config['num_epochs']):
+                # Training phase
+                model.train()
+                total_loss = 0.0
+                num_batches = 0
+                
+                for batch in train_loader:
+                    # Move data to device
+                    text = batch[0].to(device)
+                    labels = batch[1].to(device)
+                    
+                    # Create mask for attention
+                    mask = (text != 0).to(device)
+                    
+                    # Calculate lengths
+                    lengths = torch.sum(text != 0, dim=1).to(device)
+                    
+                    # Zero the gradients
+                    optimizer.zero_grad()
+                    
+                    # Forward pass
+                    outputs, _ = model(text, lengths, mask)
+                    
+                    # Calculate loss
+                    loss = criterion(outputs, labels)
+                    
+                    # Backward pass and optimize
+                    loss.backward()
+                    optimizer.step()
+                    
+                    # Update statistics
+                    total_loss += loss.item()
+                    num_batches += 1
+                
+                avg_train_loss = total_loss / num_batches
+                train_losses.append(avg_train_loss)
+                
+                # Validation phase
+                model.eval()
+                total_val_loss = 0.0
+                num_val_batches = 0
+                correct = 0
+                total = 0
+                
+                with torch.no_grad():
+                    for batch in val_loader:
+                        # Move data to device
+                        text = batch[0].to(device)
+                        labels = batch[1].to(device)
+                        
+                        # Create mask for attention
+                        mask = (text != 0).to(device)
+                        
+                        # Calculate lengths
+                        lengths = torch.sum(text != 0, dim=1).to(device)
+                        
+                        # Forward pass
+                        outputs, _ = model(text, lengths, mask)
+                        
+                        # Calculate loss
+                        loss = criterion(outputs, labels)
+                        
+                        # Update statistics
+                        total_val_loss += loss.item()
+                        num_val_batches += 1
+                        
+                        # Calculate accuracy
+                        predictions = (outputs > 0).float()
+                        correct += (predictions == labels).sum().item()
+                        total += labels.size(0)
+                
+                # Calculate validation metrics
+                avg_val_loss = total_val_loss / num_val_batches
+                val_acc = correct / total
+                val_losses.append(avg_val_loss)
+                val_accs.append(val_acc)
+                
+                # Update learning rate scheduler if enabled
+                if scheduler is not None:
+                    scheduler.step(val_acc)
+                
+                # Update best validation accuracy
+                if val_acc > best_val_acc:
+                    best_val_acc = val_acc
+                    best_epoch = epoch
+                
+                # Print progress
+                print(f"Epoch {epoch+1}/{config['num_epochs']} | "
+                      f"Train Loss: {avg_train_loss:.4f} | "
+                      f"Val Loss: {avg_val_loss:.4f} | "
+                      f"Val Acc: {val_acc:.4f}")
+                
+                # Log metrics to MLflow
+                mlflow.log_metric("train_loss", avg_train_loss, step=epoch)
+                mlflow.log_metric("val_loss", avg_val_loss, step=epoch)
+                mlflow.log_metric("val_acc", val_acc, step=epoch)
+                
+                # Report intermediate value for pruning
+                trial.report(val_acc, step=epoch)
+                
+                # Handle pruning based on the intermediate value
+                if trial.should_prune():
+                    raise optuna.exceptions.TrialPruned()
+            
+            # Log final results
+            mlflow.log_metric("best_val_acc", best_val_acc)
+            mlflow.log_metric("best_epoch", best_epoch)
+            
+            return best_val_acc
     
     # Create a study object and optimize the objective function
-    pruner = MedianPruner(n_startup_trials=5, n_warmup_steps=0, interval_steps=1)
+    pruner = MedianPruner(n_startup_trials=5, n_warmup_steps=2, interval_steps=1)
     sampler = TPESampler(seed=42)  # Use TPE algorithm with a fixed seed for reproducibility
     
     study = optuna.create_study(
         direction="maximize",  # We want to maximize validation accuracy
         sampler=sampler,
         pruner=pruner,
-        study_name="esc50_optimization"
+        study_name="sentiment_analysis_optimization"
     )
     
-    study.optimize(objective, n_trials=n_trials, timeout=timeout)
+    try:
+        with mlflow.start_run(run_name=f"bayesian_search_{timestamp}"):
+            study.optimize(objective, n_trials=n_trials, timeout=timeout)
+    except KeyboardInterrupt:
+        print("Optimization interrupted by user.")
     
     print("\n===== Bayesian Optimization Results =====")
     print(f"Best trial: {study.best_trial.number}")
@@ -366,32 +576,13 @@ def bayesian_search(data_path, num_folds=4, test_fold=5, n_trials=25, timeout=No
     # Create best config dictionary
     best_config = study.best_params.copy()
     
-    # Add some required keys that might not be in the params
-    if 'use_dropout' in best_config and best_config['use_dropout']:
-        # If dropout is enabled, keep the dropout rate
-        pass
-    else:
-        # Otherwise remove the dropout flag from the final config
-        if 'use_dropout' in best_config:
-            del best_config['use_dropout']
-    
     # For final training, we want to use more epochs
-    best_config['num_epochs'] = 50
-    
-    # Additional scheduler parameters if present
-    scheduler_keys = ['scheduler_patience', 'scheduler_factor']
-    for key in scheduler_keys:
-        if key not in best_config and best_config.get('use_lr_scheduler', False):
-            if key == 'scheduler_patience':
-                best_config[key] = 5
-            elif key == 'scheduler_factor':
-                best_config[key] = 0.5
+    best_config['num_epochs'] = 20
     
     print(json.dumps(best_config, indent=2))
     
     # Save best configuration for later use
     os.makedirs('configs', exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     config_filename = f"bayesian_best_config_{timestamp}.json"
     config_path = os.path.join('configs', config_filename)
     
@@ -404,18 +595,28 @@ def bayesian_search(data_path, num_folds=4, test_fold=5, n_trials=25, timeout=No
     
     # Save study statistics
     try:
+        # Create visualizations directory if it doesn't exist
+        os.makedirs('visualizations', exist_ok=True)
+        
+        # Create optimization history plot
         fig = optuna.visualization.plot_optimization_history(study)
         fig.write_image('visualizations/bayesian_optimization_history.png')
         
+        # Create parameter importance plot
         fig = optuna.visualization.plot_param_importances(study)
         fig.write_image('visualizations/bayesian_param_importances.png')
+        
+        # Create parameter relationships plot
+        fig = optuna.visualization.plot_slice(study)
+        fig.write_image('visualizations/bayesian_param_slices.png')
         
         # Log to MLflow if in active run
         if mlflow.active_run():
             mlflow.log_artifact('visualizations/bayesian_optimization_history.png')
             mlflow.log_artifact('visualizations/bayesian_param_importances.png')
-    except:
-        print("Warning: Could not create optimization visualizations. This may be due to missing plotly or other visualization dependencies.")
+            mlflow.log_artifact('visualizations/bayesian_param_slices.png')
+    except Exception as e:
+        print(f"Warning: Could not create optimization visualizations: {e}")
     
     return best_config, study
 
@@ -500,7 +701,7 @@ def main():
             timeout=args.timeout
         )
         print("\nTo train with the best configuration, run:")
-        print("python train.py --config configs/bayesian_best_config.json --mode final")
+        print("python train.py --config configs/bayesian_best_config.json")
         return
     
     # If no arguments provided, show help

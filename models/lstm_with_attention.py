@@ -14,9 +14,14 @@ class AttentionLayer(nn.Module):
         attention_weights = self.attention(lstm_output)  # (batch_size, seq_len, 1)
         
         if mask is not None:
+            # Ensure mask has the correct dimensions
+            if len(mask.shape) < 2:
+                # If mask is 1D, it's probably a single sequence - add batch and seq dimensions
+                if len(mask.shape) == 1:
+                    mask = mask.unsqueeze(0)  # Add batch dimension
+            
             # Ensure mask has the same sequence length as lstm_output
             if mask.size(1) != lstm_output.size(1):
-                print(f"Resizing mask from {mask.size(1)} to {lstm_output.size(1)}")
                 if mask.size(1) > lstm_output.size(1):
                     # Truncate mask to match lstm_output sequence length
                     mask = mask[:, :lstm_output.size(1)]

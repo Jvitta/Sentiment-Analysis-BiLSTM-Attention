@@ -154,6 +154,9 @@ for word in negative_words:
 print(f"\n  Unusual characters (non-ASCII):")
 if unusual_chars:
     print(f"    Found {len(unusual_chars)} unusual characters: {''.join(unusual_chars)}")
+    print("    Unicode code points:")
+    for char in sorted(unusual_chars):
+        print(f"      '{char}': U+{ord(char):04X}")
 else:
     print("    No unusual characters found")
 

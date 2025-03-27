@@ -1,0 +1,22 @@
+{
+    "test_loss": 0.2872152864933014,
+    "test_accuracy": 0.8933333333333333,
+    "test_precision": 0.8982035928143712,
+    "test_recall": 0.9090909090909091,
+    "test_f1": 0.9036144578313253,
+    "checkpoint_used": "checkpoints/20250325_174141/model_epoch_best.pt",
+    "model_config": {
+        "batch_size": 8,
+        "learning_rate": 0.0008008032554962883,
+        "weight_decay": 9.737287649867236e-05,
+        "hidden_dim": 256,
+        "num_layers": 2,
+        "dropout": 0.39637717822392393,
+        "use_lr_scheduler": true,
+        "scheduler_patience": 4,
+        "scheduler_factor": 0.21402376366182954,
+        "num_epochs": 50,
+        "vocab_size": 5355,
+        "embedding_dim": 100
+    }
+}
